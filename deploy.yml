@@ -1,0 +1,293 @@
+---
+- hosts: all
+  become: true
+  vars:
+    - miniconda_version: 4.3.14
+    - conda_installer: Miniconda3-{{miniconda_version}}-Linux-x86_64.sh
+    - conda_checksum: "md5:fc6fc37479e3e3fcf3f9ba52cae98991"
+    - conda_prefix: /opt/conda
+    - jupyterhub_config_dir: /etc/jupyterhub
+    - jupyterhub_srv_dir: /srv/jupyterhub
+    - jupyterhub_log_dir: /var/log/jupyterhub
+    - gitlab_package: gitlab-ce_9.1.4-ce.0_amd64.deb
+    - jupyterhub_version: 0.7.2
+    #- ssl_path: /etc/nginx/ssl
+    - ssl_key_path: "{{jupyterhub_config_dir}}/jupyterhub.key"
+    - ssl_cert_path: "{{jupyterhub_config_dir}}/jupyterhub.crt"
+    - letsencrypt_ssl_key_path: "/etc/letsencrypt/live/{{inventory_hostname}}/privkey.pem"
+    - letsencrypt_ssl_cert_path: "/etc/letsencrypt/live/{{inventory_hostname}}/fullchain.pem"
+    - proxy_auth_token: '{PROXY AUTH TOKEN}'
+    - use_proxy: false
+    - use_letsencrypt: true
+    - letsencrypt_email: bertinato@ldeo.columbia.edu
+    - oauth_callback_url: 'https://host/hub/oauth_callback'
+    - oauth_client_id: '{OAUTH CLIENT ID}'
+    - oauth_client_secret: '{OAUTH CLIENT SECRET HERE}'
+  tasks:
+    - name: Add repo for Python 3.6
+      apt_repository:
+        repo: 'ppa:jonathonf/python-3.6'
+
+    - name: Update apt repos
+      apt: update_cache=yes cache_valid_time=3600
+
+    - name: Install aptitude to update apt
+      apt: pkg=aptitude
+
+    - name: Update apt
+      apt: upgrade=safe
+
+    - name: Install build-essential tools
+      apt: pkg=build-essential state=present
+
+    - name: Install git
+      apt: pkg=git state=present
+
+    - name: Install Python
+      apt: pkg={{ item }} state=present
+      with_items:
+        - python2.7
+        - python-dev
+        - python3.5-dev
+        - python3.6
+        - python3.6-dev
+
+    - name: Get pip install script
+      get_url: dest=/tmp/get_pip.py url=https://bootstrap.pypa.io/get-pip.py
+
+    - name: Install pip for Python 2.7 and 3.6
+      command: "{{ item }} /tmp/get_pip.py"
+      with_items:
+        - python2.7
+        - python3.6
+
+    - name: Install pip for Python 2.7 and 3.5
+      command: "{{ item }} /tmp/get_pip.py"
+      with_items:
+        - python2.7
+        - python3.5
+
+    - name: Install nginx
+      apt: pkg=nginx-full
+      when: use_proxy
+
+    - name: Check that jupyterhub config directory exists
+      file: path={{jupyterhub_config_dir}}/ state={{item}} owner=root group=root mode=0755
+      with_items:
+        - directory
+        - touch
+
+    - name: Check that jupyterhub srv directory exists
+      file: path={{jupyterhub_srv_dir}}/ state={{item}} owner=root group=root mode=0700
+      with_items:
+        - directory
+        - touch
+
+    - name: Check that jupyterhub log directory exists
+      file: path={{jupyterhub_log_dir}}/ state={{item}} owner=root group=root mode=0755
+      with_items:
+        - directory
+        - touch
+
+    # --------------------------
+    # Configure and launch nginx
+    # --------------------------
+    - name: find notebook static directory
+      command: python3 -c 'import notebook; import os; print(os.path.join(notebook.__path__[0], "static"));'
+      register: notebook_static_directory
+      when: use_proxy
+
+    # TO DO: Need to add handler here for reload
+    - name: Install nginx.conf
+      template: src=nginx.conf.j2 dest=/etc/nginx/nginx.conf owner=root group=root mode=0644 backup=yes
+      when: use_proxy
+
+    - name: Start the nginx service
+      service: name=nginx state=started enabled=yes
+      when: use_proxy
+
+    - name: Reload nginx
+      service: name=nginx state=reloaded
+      when: use_proxy
+
+    - name: Install supervisord
+      apt: pkg=supervisor state=present
+
+    - name: Make sure supervisord is running
+      service: name=supervisor enabled=yes state=started
+
+    - name: Ensure that supervisord runs as root
+      lineinfile: dest=/etc/supervisor/supervisord.conf state=present line="user=root" insertafter="^\[supervisord\]" backup=yes
+
+    - name: Restart supervisord
+      service: name=supervisor state=restarted
+
+    - name: Install packages required for jupyterhub
+      apt: pkg={{ item }} state=latest update_cache=yes
+      with_items:
+        - npm
+        - nodejs
+
+    - name: Hack for nodejs naming issue on Ubuntu
+      file:
+        src: /usr/bin/nodejs
+        dest: /usr/bin/node
+        state: link
+
+    - name: Install configurable-http-proxy
+      npm:
+        name: configurable-http-proxy
+        global: yes
+        state: present
+
+    - name: Install notebook
+      pip: name=notebook state=latest executable=pip3
+
+    - name: Install Python 3 kernel
+      pip: name=ipykernel state=present executable=pip3
+
+    - name: Register Python3 kernel
+      command: python3.6 -m ipykernel install
+
+    - name: Install Python2 kernel
+      pip: name=ipykernel state=present executable=pip2
+
+    - name: Register Python2 kernel
+      command: python2.7 -m ipykernel install
+
+    - name: Install jupyterhub
+      pip: name=jupyterhub editable=false state=present executable=pip3
+
+    # --------------------------------------
+    # Install SSL cert/key using letsencrypt
+    # --------------------------------------
+    - name: Stop the nginx service
+      service: name=nginx state=stopped enabled=yes
+      when: use_proxy and use_letsencrypt
+
+    - name: Stop jupyterhub
+      supervisorctl: name=jupyterhub state=stopped
+      when: not use_proxy and use_letsencrypt
+
+    - name: Set apt-yes default (needed for certbot)
+      lineinfile:
+        dest: /etc/apt/apt.conf.d/99-apt-yes
+        state: present
+        line: 'APT::Get::Assume-Yes "true";'
+        create: yes
+      when: use_letsencrypt
+
+    - name: Install certbot
+      get_url:
+        url: https://dl.eff.org/certbot-auto
+        dest: /usr/local/bin/certbot-auto
+        mode: 755
+      when: use_letsencrypt
+
+    - name: SSL credentials with certbot
+      command: /usr/local/bin/certbot-auto certonly --non-interactive --agree-tos --standalone -m {{ letsencrypt_email }} -d {{ inventory_hostname }} creates={{ letsencrypt_ssl_cert_path }}
+      when: use_letsencrypt
+
+    - name: Setup letsencrypt renewal with cron
+      template: src=letsencrypt-renew.j2 dest=/etc/cron.daily/letsencrypt-renew mode=0755
+      when: use_letsencrypt
+
+    # ------------------------------------------------------
+    # Or, generate self-signed cert/key for testing
+    # NOTE: Safari will not accept a self-signed certificate
+    # ------------------------------------------------------
+    - name: Generate self-signed SSL certificate
+      command: openssl req -new -nodes -x509 -subj "/C=US/ST=New York/L=Palisades/O=LDEO/CN=test" -days 365 -keyout {{ssl_key_path}} -out {{ssl_cert_path}} creates="{{ssl_cert_path}}"
+      when: not use_letsencrypt
+
+    - name: Generate cookie secret file
+      command: openssl rand -hex 32 -out {{jupyterhub_srv_dir}}/cookie_secret creates="{{jupyterhub_srv_dir}}/cookie_secret"
+      when: not use_letsencrypt
+
+    - name: Start the nginx service
+      service: name=nginx state=started enabled=yes
+      when: use_proxy and use_letsencrypt
+
+    - name: Stop jupyterhub
+      supervisorctl: name=jupyterhub state=started
+      when: not use_proxy and use_letsencrypt
+
+    - name: Set permissions for cookie secret file
+      file:
+        path: "{{jupyterhub_srv_dir}}/cookie_secret"
+        owner: root
+        group: root
+        mode: 0600
+
+    - name: Install oauthenticator
+      pip: name=oauthenticator state=present editable=false executable=pip3
+
+    - name: Check that repo key is installed
+      apt_key:
+        id: "58118E89F3A912897C070ADBF76221572C52609D"
+        keyserver: "hkp://p80.pool.sks-keyservers.net:80"
+        state: present
+
+    - name: Add Docker repo
+      apt_repository: repo='deb https://apt.dockerproject.org/repo ubuntu-xenial main' state=present
+
+    - name: Install Docker and dependencies
+      apt: name=docker-engine update_cache=yes
+
+    - name: Start Docker service
+      service: name=docker enabled=yes state=restarted
+
+    - name: Install DockerSpawner
+      pip: name={{ item }} state=present executable=pip3
+      with_items:
+        - dockerspawner
+        - netifaces
+
+    - name: Install docker-py
+      pip: name=docker-py state=present executable=pip3
+
+    - name: Copy Dockerfile
+      copy:
+        src: Dockerfile
+        dest: /usr/local/etc/Dockerfile
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Build Docker image for singleuser notebook server
+      docker_image:
+        path: /usr/local/etc
+        name: custom-container
+        state: present
+        force: yes
+
+    - name: Add jupyterhub user
+      user:
+        name: jupyterhub
+        shell: /bin/bash
+        password: $6$TyROpqo9dIahe/WY$VmH.d4xibhoWHT/2NRDVoMaKV43VG1P5vORk.Itv/ejXI6vx.RHlTv56PM5V9uWLcIWYF88arcvyn2ZFEVBFi.
+
+    - name: Check that data-share directory exists
+      file: path=/data-public state={{item}} owner=jupyterhub group=jupyterhub mode=0755
+      with_items:
+        - directory
+
+    # - name: Pull single-user jupyterhub Docker image
+    #   docker_image:
+    #     name: jupyterhub/singleuser
+    #     state: present
+
+    - name: Install jupyterhub config file
+      template: src=jupyterhub_config.py.j2 dest={{jupyterhub_config_dir}}/jupyterhub_config.py owner=root group=root mode=0644
+
+    - name: Install supervisor config for jupyterhub
+      template: src=jupyterhub.conf.j2 dest=/etc/supervisor/conf.d/jupyterhub.conf owner=root group=root mode=0600 backup=yes
+
+    - name: Install jupyterhub launch script
+      template: src=start-jupyterhub.sh.j2 dest={{jupyterhub_srv_dir}}/start-jupyterhub.sh mode=0700
+
+    - name: Load jupyterhub supervisor config
+      supervisorctl: name=jupyterhub state=present
+
+    - name: Start jupyterhub with supervisor
+      supervisorctl: name=jupyterhub state=restarted

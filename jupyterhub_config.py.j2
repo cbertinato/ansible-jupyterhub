@@ -1,0 +1,57 @@
+# {{ ansible_managed }}
+# Configuration file for jupyterhub.
+import os
+
+# TLS config
+{% if use_proxy %}
+c.JupyterHub.port = 8000
+c.JupyterHub.proxy_auth_token = '{{ proxy_auth_token }}'
+c.JupyterHub.confirm_no_ssl = True
+{% else %}
+c.JupyterHub.port = 443
+{% endif %}
+
+{% if use_letsencrypt %}
+c.JupyterHub.ssl_key = '{{ letsencrypt_ssl_key_path }}'
+c.JupyterHub.ssl_cert = '{{ letsencrypt_ssl_cert_path }}'
+{% else %}
+c.JupyterHub.ssl_key = '{{ ssl_key_path }}'
+c.JupyterHub.ssl_cert = '{{ ssl_cert_path }}'
+{% endif %}
+
+#c.JupyterHub.db_url = '{{ jupyterhub_srv_dir }}/jupyterhub.sqlite'
+c.JupyterHub.cookie_secret_file = '{{ jupyterhub_srv_dir }}/cookie_secret'
+
+# Authenticate users with GitHub OAuth
+from oauthenticator.github import GitHubOAuthenticator
+c.JupyterHub.authenticator_class = 'oauthenticator.GitHubOAuthenticator'
+c.GitHubOAuthenticator.client_id = '{{ oauth_client_id }}'
+c.GitHubOAuthenticator.client_secret = '{{ oauth_client_secret }}'
+c.GitHubOAuthenticator.oauth_callback_url = '{{ oauth_callback_url }}'
+
+c.Authenticator.whitelist = {'cbertinato', 'porterdf'}
+c.Authenticator.admin_users = {'cbertinato'}
+
+from dockerspawner import DockerSpawner
+c.JupyterHub.spawner_class = 'dockerspawner.DockerSpawner'
+
+# The hub's API listens on localhost by default, but docker containers can't see that.
+# Tell the hub to listen on its docker network.
+import netifaces
+docker0 = netifaces.ifaddresses('docker0')
+docker0_ipv4 = docker0[netifaces.AF_INET][0]
+c.JupyterHub.hub_ip = docker0_ipv4['addr']
+
+c.DockerSpawner.container_image = 'custom-container'
+
+# Remove containers once they are stopped
+c.DockerSpawner.remove_containers = True
+
+# Mount the user's directory on the host to user's director in the container
+notebook_dir = os.environ.get('DOCKER_NOTEBOOK_DIR') or '/home/jovyan/work'
+c.DockerSpawner.notebook_dir = notebook_dir
+data_public_dir = notebook_dir + '/data-public'
+c.DockerSpawner.volumes = { 'jupyterhub-user-{username}': notebook_dir ,
+                            '/data-public': data_public_dir }
+c.DockerSpawner.extra_create_kwargs.update({ 'volume_driver': 'local' })
+c.DockerSpawner.extra_host_config = {'mem_limit': '1g'}

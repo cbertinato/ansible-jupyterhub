@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+date >> /var/log/letsencrypt.log
+WEBROOT=/etc/letsencrypt/webroot
+test -d "$WEBROOT" || mkdir -p "$WEBROOT"
+certbot-auto renew --webroot --webroot-path="$WEBROOT" --no-self-upgrade 2>&1 &>> /var/log/letsencrypt.log
+{% if use_proxy %}
+service nginx reload
+{% else %}
+supervisorctl update
+supervisorctl restart
+{% endif %}

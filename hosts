@@ -1,0 +1,5 @@
+[scott]
+scott.ldeo.columbia.edu
+
+[scott:vars]
+ansible_python_interpreter=/usr/bin/python3
